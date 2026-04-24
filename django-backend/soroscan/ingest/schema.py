@@ -71,6 +71,11 @@ class ContractType:
         return int(tid) if tid is not None else None
 
     @strawberry.field
+    def organization_id(self) -> Optional[int]:
+        oid = getattr(self, "organization_id", None)
+        return int(oid) if oid is not None else None
+
+    @strawberry.field
     def event_count(self) -> int:
         return self.events.count()
 
@@ -368,9 +373,16 @@ class NotificationType:
 @strawberry.type
 class Query:
     @strawberry.field
-    def contracts(self, is_active: Optional[bool] = None, alias: Optional[str] = None) -> list[ContractType]:
+    def contracts(self, info: Info, is_active: Optional[bool] = None, alias: Optional[str] = None) -> list[ContractType]:
         """Get all tracked contracts. Optionally filter by alias substring. Sorted by alias when set."""
         qs = TrackedContract.objects.select_related("contractmetadata").all()
+        user = _get_authenticated_user(info)
+        if user:
+            qs = qs.filter(
+                Q(owner=user)
+                | Q(team__memberships__user=user)
+                | Q(organization__memberships__user=user)
+            ).distinct()
         if is_active is not None:
             qs = qs.filter(is_active=is_active)
         if alias is not None:
@@ -386,12 +398,25 @@ class Query:
         return qs
 
     @strawberry.field
-    def contract(self, contract_id: str) -> Optional[ContractType]:
+    def contract(self, info: Info, contract_id: str) -> Optional[ContractType]:
         """Get a specific contract by ID."""
+        user = _get_authenticated_user(info)
+        if not user:
+            try:
+                return TrackedContract.objects.select_related("contractmetadata").get(contract_id=contract_id)
+            except TrackedContract.DoesNotExist:
+                return None
         try:
-            return TrackedContract.objects.select_related("contractmetadata").get(contract_id=contract_id)
+            return TrackedContract.objects.select_related("contractmetadata").get(
+                contract_id=contract_id,
+                owner=user,
+            )
         except TrackedContract.DoesNotExist:
-            return None
+            return TrackedContract.objects.select_related("contractmetadata").filter(
+                contract_id=contract_id,
+            ).filter(
+                Q(team__memberships__user=user) | Q(organization__memberships__user=user)
+            ).first()
 
     @strawberry.field
     def contract_metadata(self, contract_id: str) -> Optional[ContractMetadataType]:

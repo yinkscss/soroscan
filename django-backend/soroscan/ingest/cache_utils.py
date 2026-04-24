@@ -61,6 +61,31 @@ def invalidate_event_count_cache(contract_id: str) -> None:
     """Invalidate event count cache for a contract."""
     key = f"event_count:{contract_id}"
     cache.delete(key)
+
+
+DECODED_PAYLOAD_TTL = 86_400  # 24 hours
+
+
+def decoded_payload_cache_key(event_id: int) -> str:
+    """Return the Redis key for a cached decoded payload."""
+    return f"soroscan:decoded:{event_id}"
+
+
+def get_cached_decoded_payload(event_id: int) -> Any:
+    """Return cached decoded payload or _SENTINEL if not cached."""
+    return cache.get(decoded_payload_cache_key(event_id), _SENTINEL)
+
+
+def set_cached_decoded_payload(event_id: int, payload: Any) -> None:
+    """Store decoded payload in cache with 24-hour TTL."""
+    cache.set(decoded_payload_cache_key(event_id), payload, timeout=DECODED_PAYLOAD_TTL)
+
+
+def invalidate_decoded_payload_cache(event_id: int) -> None:
+    """Invalidate the decoded payload cache for a specific event."""
+    cache.delete(decoded_payload_cache_key(event_id))
+
+
 def cache_result(ttl: int) -> Callable:
     """Cache successful DRF function-view responses for ``ttl`` seconds."""
 

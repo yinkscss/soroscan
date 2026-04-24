@@ -13,6 +13,79 @@ from django.utils.text import slugify
 User = get_user_model()
 
 
+class Organization(models.Model):
+    """Top-level tenant boundary for contracts, teams, and members."""
+
+    name = models.CharField(max_length=128)
+    slug = models.SlugField(max_length=160, unique=True, db_index=True)
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="owned_organizations",
+    )
+    settings = models.JSONField(default=dict, blank=True)
+    quota = models.PositiveIntegerField(default=0, help_text="Optional monthly event quota")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base = slugify(self.name) or "organization"
+            slug = base
+            n = 0
+            while Organization.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+                n += 1
+                slug = f"{base}-{n}"
+            self.slug = slug
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+
+class OrganizationMembership(models.Model):
+    """Links a user to an organization with RBAC roles."""
+
+    class Role(models.TextChoices):
+        OWNER = "owner", "Owner"
+        ADMIN = "admin", "Admin"
+        MEMBER = "member", "Member"
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="organization_memberships",
+    )
+    role = models.CharField(
+        max_length=16,
+        choices=Role.choices,
+        default=Role.MEMBER,
+    )
+    invited_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sent_organization_invites",
+    )
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [("organization", "user")]
+        ordering = ["-joined_at"]
+
+    def __str__(self):
+        return f"{self.user} @ {self.organization} ({self.role})"
+
+
 class Team(models.Model):
     """
     Multi-tenant organization: groups users and shared tracked contracts.
@@ -20,6 +93,13 @@ class Team(models.Model):
 
     name = models.CharField(max_length=128)
     slug = models.SlugField(max_length=160, unique=True, db_index=True)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="teams",
+        null=True,
+        blank=True,
+    )
     created_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
@@ -51,6 +131,7 @@ class TeamMembership(models.Model):
     """Links a user to a team with a role."""
 
     class Role(models.TextChoices):
+        OWNER = "owner", "Owner"
         ADMIN = "admin", "Admin"
         MEMBER = "member", "Member"
 
@@ -108,6 +189,14 @@ class TrackedContract(models.Model):
         on_delete=models.CASCADE,
         related_name="tracked_contracts",
         help_text="User who registered this contract",
+    )
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="tracked_contracts",
+        null=True,
+        blank=True,
+        help_text="Organization scope for tenant isolation",
     )
     team = models.ForeignKey(
         Team,
@@ -581,6 +670,25 @@ class WebhookSubscription(models.Model):
     def __str__(self):
         return f"Webhook -> {self.target_url} ({self.contract.name})"
 
+    def get_known_event_types(self):
+        types = set()
+        if hasattr(self.contract, "event_schemas"):
+            types.update(self.contract.event_schemas.values_list("event_type", flat=True))
+        if hasattr(self.contract, "abi") and self.contract.abi.abi_json:
+            for ev in self.contract.abi.abi_json:
+                if isinstance(ev, dict) and ev.get("name"):
+                    types.add(ev["name"])
+        types.update(self.contract.events.values_list("event_type", flat=True).distinct())
+        return types
+
+    def clean(self):
+        super().clean()
+        if self.event_type and self.contract_id:
+            known = self.get_known_event_types()
+            if known and self.event_type not in known:
+                from django.core.exceptions import ValidationError
+                raise ValidationError({"event_type": f"Invalid event type. Available types: {', '.join(sorted(known))}"})
+
     def save(self, *args, **kwargs):
         # Auto-generate secret if not set
         if not self.secret:
@@ -746,6 +854,13 @@ class APIKey(models.Model):
         on_delete=models.CASCADE,
         related_name="api_keys",
     )
+    team = models.ForeignKey(
+        Team,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="api_keys",
+    )
     name = models.CharField(max_length=128)
     key = models.CharField(max_length=64, unique=True, db_index=True)
     tier = models.CharField(
@@ -770,6 +885,8 @@ class APIKey(models.Model):
         if not self.quota_per_hour:
             quota = self.TIER_QUOTAS.get(self.tier, 50)
             self.quota_per_hour = quota if quota is not None else self.UNLIMITED_QUOTA
+        if self.team and not TeamMembership.objects.filter(team=self.team, user=self.user).exists():
+            raise ValidationError("API key user must be a member of the assigned team.")
         super().save(*args, **kwargs)
 
     def __str__(self):

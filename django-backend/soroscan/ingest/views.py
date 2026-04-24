@@ -30,20 +30,23 @@ from .cache_utils import cache_result, get_or_set_json, query_cache_ttl, stable_
 from .models import (
     APIKey,
     AdminAction,
+    ArchivedEventBatch,
     ContractEvent,
     ContractInvocation,
     IngestError,
+    Organization,
+    OrganizationMembership,
     Team,
     TeamMembership,
     TrackedContract,
     WebhookSubscription,
-    ArchivedEventBatch,
 )
 from .serializers import (
     APIKeySerializer,
     ContractEventSerializer,
     ContractInvocationSerializer,
     EventSearchSerializer,
+    OrganizationSerializer,
     RecordEventRequestSerializer,
     TeamMemberAddSerializer,
     TeamSerializer,
@@ -74,6 +77,52 @@ class AdminActionSerializer(serializers.ModelSerializer):
 
 def _frontend_base_url() -> str:
     return getattr(settings, "FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+
+
+class OrganizationViewSet(viewsets.ModelViewSet):
+    """Manage organizations and members."""
+
+    serializer_class = OrganizationSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [OrderingFilter]
+    ordering_fields = ["name", "created_at"]
+    ordering = ["name"]
+
+    def get_queryset(self):
+        return Organization.objects.filter(memberships__user=self.request.user).distinct()
+
+    @action(detail=True, methods=["post"], url_path="members")
+    def members(self, request, pk=None):
+        organization = self.get_object()
+        can_manage = OrganizationMembership.objects.filter(
+            organization=organization,
+            user=request.user,
+            role__in=[OrganizationMembership.Role.OWNER, OrganizationMembership.Role.ADMIN],
+        ).exists()
+        if not can_manage:
+            return Response(
+                {"detail": "Only organization owners/admins can add members."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        ser = TeamMemberAddSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        try:
+            target_user = User.objects.get(pk=ser.validated_data["user_id"])
+        except User.DoesNotExist:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        _, created = OrganizationMembership.objects.get_or_create(
+            organization=organization,
+            user=target_user,
+            defaults={"role": ser.validated_data["role"], "invited_by": request.user},
+        )
+        if not created:
+            return Response({"status": "already_member"}, status=status.HTTP_200_OK)
+        return Response({"status": "created"}, status=status.HTTP_201_CREATED)
 
 
 class TrackedContractViewSet(viewsets.ModelViewSet):
@@ -127,7 +176,11 @@ class TrackedContractViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if self.request.method in ["GET", "HEAD", "OPTIONS"]:
             if user.is_authenticated:
-                return qs.filter(Q(owner=user) | Q(team__memberships__user=user)).distinct()
+                return qs.filter(
+                    Q(owner=user)
+                    | Q(team__memberships__user=user)
+                    | Q(organization__memberships__user=user)
+                ).distinct()
             return qs
         return qs.filter(owner=self.request.user)
 
@@ -533,7 +586,10 @@ class TeamViewSet(viewsets.ModelViewSet):
     ordering = ["name"]
 
     def get_queryset(self):
-        return Team.objects.filter(memberships__user=self.request.user).distinct()
+        return Team.objects.filter(
+            Q(memberships__user=self.request.user)
+            | Q(organization__memberships__user=self.request.user)
+        ).distinct()
 
     @extend_schema(
         request=TeamMemberAddSerializer,
@@ -550,7 +606,7 @@ class TeamViewSet(viewsets.ModelViewSet):
         admin = TeamMembership.objects.filter(
             team=team,
             user=request.user,
-            role=TeamMembership.Role.ADMIN,
+            role__in=[TeamMembership.Role.OWNER, TeamMembership.Role.ADMIN],
         ).exists()
         if not admin:
             return Response(

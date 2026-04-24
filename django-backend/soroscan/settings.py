@@ -279,12 +279,20 @@ STELLAR_NETWORK_PASSPHRASE = env(
 SOROSCAN_CONTRACT_ID = env("SOROSCAN_CONTRACT_ID", default="")
 INDEXER_SECRET_KEY = env("INDEXER_SECRET_KEY", default="")
 
+# ---------------------------------------------------------------------------
+# GraphQL Introspection (security: disable in production)
+# ---------------------------------------------------------------------------
+# Set GRAPHQL_INTROSPECTION_ENABLED=True to allow introspection queries.
+# Defaults to True in DEBUG mode, False otherwise.
+GRAPHQL_INTROSPECTION_ENABLED = env.bool(
+    "GRAPHQL_INTROSPECTION_ENABLED",
+    default=DEBUG,
+)
+
 # Prometheus
 # Expose the /metrics endpoint without authentication.
 # The URL is registered in urls.py via django_prometheus.urls.
 PROMETHEUS_EXPORT_MIGRATIONS = False  # avoid migration noise in metrics
-
-# Logging: set LOG_FORMAT=json for structured JSON logs (no PII in messages or extra).
 LOG_FORMAT = env("LOG_FORMAT", default="")
 LOGGING = {
     "version": 1,

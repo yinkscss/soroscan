@@ -26,6 +26,8 @@ from .models import (
     EventSchema,
     IndexerState,
     IngestError,
+    Organization,
+    OrganizationMembership,
     RemediationIncident,
     RemediationRule,
     Team,
@@ -98,7 +100,7 @@ class AdminAuditMixin:
 
 @admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "created_by", "created_at"]
+    list_display = ["name", "organization", "slug", "created_by", "created_at"]
     search_fields = ["name", "slug"]
     prepopulated_fields = {"slug": ("name",)}
 
@@ -108,6 +110,20 @@ class TeamMembershipAdmin(admin.ModelAdmin):
     list_display = ["team", "user", "role", "joined_at"]
     list_filter = ["role"]
     search_fields = ["team__name", "user__username"]
+
+
+@admin.register(Organization)
+class OrganizationAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "owner", "quota", "created_at"]
+    search_fields = ["name", "slug", "owner__username"]
+    readonly_fields = ["created_at", "updated_at"]
+
+
+@admin.register(OrganizationMembership)
+class OrganizationMembershipAdmin(admin.ModelAdmin):
+    list_display = ["organization", "user", "role", "invited_by", "joined_at"]
+    list_filter = ["role"]
+    search_fields = ["organization__name", "user__username"]
 
 
 
@@ -473,6 +489,44 @@ class WebhookSubscriptionAdmin(AdminAuditMixin, admin.ModelAdmin):
         }),
     )
     ordering = ["-created_at"]
+
+    class Media:
+        js = ("ingest/admin_event_type_autocomplete.js",)
+
+    def get_urls(self):
+        from django.urls import path
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "event-types/",
+                self.admin_site.admin_view(self.event_types_api),
+                name="webhooksubscription_event_types",
+            ),
+        ]
+        return custom_urls + urls
+
+    def event_types_api(self, request):
+        from django.http import JsonResponse
+        from soroscan.ingest.models import TrackedContract
+        contract_id = request.GET.get("contract_id")
+        if not contract_id:
+            return JsonResponse({"results": []})
+        try:
+            contract = TrackedContract.objects.get(pk=contract_id)
+        except TrackedContract.DoesNotExist:
+            return JsonResponse({"results": []})
+        
+        types = set()
+        if hasattr(contract, "event_schemas"):
+            types.update(contract.event_schemas.values_list("event_type", flat=True))
+        if hasattr(contract, "abi") and contract.abi.abi_json:
+            for ev in contract.abi.abi_json:
+                if isinstance(ev, dict) and ev.get("name"):
+                    types.add(ev["name"])
+        types.update(contract.events.values_list("event_type", flat=True).distinct())
+        
+        results = [{"id": t, "text": t} for t in sorted(types)]
+        return JsonResponse({"results": results})
 
     def get_queryset(self, request):
         """Optimize queries with select_related to prevent N+1 issues."""

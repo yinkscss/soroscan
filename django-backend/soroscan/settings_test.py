@@ -165,6 +165,9 @@ EVENT_STREAMING = {
     },
 }
 
+# GraphQL Introspection — enabled in tests/dev
+GRAPHQL_INTROSPECTION_ENABLED = True
+
 # Logging
 LOGGING = {
     "version": 1,

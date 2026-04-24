@@ -219,6 +219,10 @@ class DecodeEventPayloadTest(TestCase):
 class UpsertDecodingIntegrationTest(TestCase):
     """_upsert_contract_event should set decoding_status correctly."""
 
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
     def test_no_abi_sets_no_abi_status(self):
         """Without a ContractABI, status remains 'no_abi'."""
         from soroscan.ingest.tasks import _upsert_contract_event
